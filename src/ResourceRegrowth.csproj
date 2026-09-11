@@ -7,8 +7,8 @@
     <Version>0.1.0</Version>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
     <OutputPath>$(MSBuildThisFileDirectory)../bin/$(Configuration)/</OutputPath>
-    <!-- Path to a Valheim dedicated server with BepInEx; override with -p:ValheimServerDir=... -->
-    <ValheimServerDir Condition="'$(ValheimServerDir)' == ''">/home/mistrcech/Projects/valheim-dedi-1.0</ValheimServerDir>
+    <!-- Path to a Valheim dedicated server with BepInEx: environment variable VALHEIM_DEDI_INSTALL or -p:ValheimServerDir=... -->
+    <ValheimServerDir Condition="'$(ValheimServerDir)' == ''">$(VALHEIM_DEDI_INSTALL)</ValheimServerDir>
     <Managed>$(ValheimServerDir)/valheim_server_Data/Managed</Managed>
   </PropertyGroup>
   <ItemGroup>

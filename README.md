@@ -83,10 +83,11 @@ set `DryRun = false`.
 
 ## Build
 
-Requires the .NET SDK and a Valheim dedicated server with BepInEx installed (for the reference assemblies):
+Requires the .NET SDK and a Valheim dedicated server with BepInEx installed (for the reference assemblies).
+Point `VALHEIM_DEDI_INSTALL` at it, or pass `-p:ValheimServerDir=...`:
 
 ```
-dotnet build src/ResourceRegrowth.csproj -c Release -p:ValheimServerDir=/path/to/valheim_server
+VALHEIM_DEDI_INSTALL=/path/to/valheim_server dotnet build src/ResourceRegrowth.csproj -c Release
 ```
 
 The DLL ends up in `bin/Release/`.
