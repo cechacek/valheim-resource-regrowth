@@ -1,0 +1,57 @@
+using BepInEx;
+using BepInEx.Logging;
+using UnityEngine;
+
+namespace ResourceRegrowth
+{
+	/*
+		Server-side only: runs on a dedicated server, changes world objects directly, and needs
+		nothing on clients. Depends on BepInEx and nothing else, and patches no game code.
+	*/
+	[BepInPlugin(GUID, PluginName, PluginVersion)]
+	public class RegrowthPlugin : BaseUnityPlugin
+	{
+		public const string GUID = "sarkasticeu.resource_regrowth";
+		public const string PluginName = "Sarkastic.eu Resource Regrowth";
+		public const string PluginVersion = "0.1.0";
+
+		internal static ManualLogSource Log;
+
+		private Settings settings;
+		private Regrowth regrowth;
+
+		private void Awake()
+		{
+			Log = Logger;
+			settings = new Settings(Config);
+		}
+
+		private void Update()
+		{
+			bool ready = settings.Enabled.Value && WorldReady();
+			if (regrowth == null && ready)
+			{
+				regrowth = new Regrowth(this, settings);
+				regrowth.Start();
+			}
+			else if (regrowth != null && !ready)
+			{
+				regrowth.Stop();
+				regrowth = null;
+			}
+			regrowth?.Tick(Time.unscaledDeltaTime);
+		}
+
+		private void OnDestroy()
+		{
+			regrowth?.Stop();
+		}
+
+		private static bool WorldReady()
+		{
+			return ZNet.instance && ZNet.instance.IsDedicated() && ZNet.instance.IsServer() && ZNet.World != null
+				&& ZDOMan.instance != null && ZNetScene.instance && EnvMan.instance && ObjectDB.instance
+				&& ZoneSystem.instance && ZoneSystem.instance.LocationsGenerated;
+		}
+	}
+}
