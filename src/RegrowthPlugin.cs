@@ -49,8 +49,8 @@ namespace ResourceRegrowth
 
 		private static bool WorldReady()
 		{
-			return ZNet.instance && ZNet.instance.IsDedicated() && ZNet.instance.IsServer() && ZNet.World != null
-				&& ZDOMan.instance != null && ZNetScene.instance && EnvMan.instance && ObjectDB.instance
+			return ZNet.instance && ZNet.instance.enabled && ZNet.instance.IsDedicated() && ZNet.instance.IsServer() && ZNet.World != null
+				&& ZDOMan.instance != null && ZNetScene.instance && ObjectDB.instance
 				&& ZoneSystem.instance && ZoneSystem.instance.LocationsGenerated;
 		}
 	}

@@ -10,17 +10,19 @@ namespace ResourceRegrowth
 		- when a player was last near each zone;
 		- since when each depleted object has been seen depleted.
 
-		Both clocks start at the plugin's first run on a world, so nothing regrows until
-		IdleDays / AfterDays have passed since installing it -- the plugin cannot know what
-		happened before.
+		Times are real time in UTC. Both clocks start at the plugin's first run on a world, so
+		nothing regrows until IdleHours / AfterHours have passed since installing it -- the plugin
+		cannot know what happened before.
 	*/
 	internal class RegrowthState
 	{
-		private readonly string path;
-		private readonly Dictionary<Vector2s, double> lastSeen = new Dictionary<Vector2s, double>();
-		private readonly Dictionary<string, double> depletedSince = new Dictionary<string, double>();
+		private const string TimeFormat = "yyyy-MM-dd'T'HH:mm:ss'Z'";
 
-		public double FirstRunDay { get; private set; }
+		private readonly string path;
+		private readonly Dictionary<Vector2s, DateTime> lastSeen = new Dictionary<Vector2s, DateTime>();
+		private readonly Dictionary<string, DateTime> depletedSince = new Dictionary<string, DateTime>();
+
+		public DateTime FirstRun { get; private set; }
 		public string FilePath => path;
 
 		public RegrowthState(string path)
@@ -28,14 +30,20 @@ namespace ResourceRegrowth
 			this.path = path;
 		}
 
-		public void Load(double now)
+		public void Load(DateTime now)
 		{
-			FirstRunDay = now;
-			if (!File.Exists(path))
+			FirstRun = now;
+			string file = path;
+			if (!File.Exists(file))
 			{
-				return;
+				// Save replaces the file by delete + move; a stop between the two leaves only the new copy.
+				file = path + ".tmp";
+				if (!File.Exists(file))
+				{
+					return;
+				}
 			}
-			foreach (string raw in File.ReadAllLines(path))
+			foreach (string raw in File.ReadAllLines(file))
 			{
 				string[] f = raw.Split(' ');
 				try
@@ -43,7 +51,7 @@ namespace ResourceRegrowth
 					switch (f[0])
 					{
 						case "firstrun":
-							FirstRunDay = Parse(f[1]);
+							FirstRun = Parse(f[1]);
 							break;
 						case "zone":
 							lastSeen[new Vector2s(int.Parse(f[1], CultureInfo.InvariantCulture), int.Parse(f[2], CultureInfo.InvariantCulture))] = Parse(f[3]);
@@ -62,20 +70,28 @@ namespace ResourceRegrowth
 		}
 
 		/*
-			World time can be behind what the file recorded: the world was rolled back to an older
-			save, or it stopped at a point the plugin had already written past. Times in the future
-			would keep objects waiting until the world catches up, so they count from now instead.
+			A time in the future (the system clock was set back, or the file was edited) would keep
+			objects waiting until the clock catches up, so it counts from now instead.
 		*/
-		private void ClampToNow(double now)
+		private void ClampToNow(DateTime now)
 		{
-			FirstRunDay = Math.Min(FirstRunDay, now);
+			if (FirstRun > now)
+			{
+				FirstRun = now;
+			}
 			foreach (Vector2s zone in new List<Vector2s>(lastSeen.Keys))
 			{
-				lastSeen[zone] = Math.Min(lastSeen[zone], now);
+				if (lastSeen[zone] > now)
+				{
+					lastSeen[zone] = now;
+				}
 			}
 			foreach (string key in new List<string>(depletedSince.Keys))
 			{
-				depletedSince[key] = Math.Min(depletedSince[key], now);
+				if (depletedSince[key] > now)
+				{
+					depletedSince[key] = now;
+				}
 			}
 		}
 
@@ -83,14 +99,14 @@ namespace ResourceRegrowth
 		{
 			List<string> lines = new List<string>
 			{
-				"# Sarkastic.eu Resource Regrowth state. In-game days. Edit only while the server is stopped.",
-				"firstrun " + Format(FirstRunDay),
+				"# Sarkastic.eu Resource Regrowth state. Real time, UTC. Edit only while the server is stopped.",
+				"firstrun " + Format(FirstRun),
 			};
-			foreach (KeyValuePair<Vector2s, double> zone in lastSeen)
+			foreach (KeyValuePair<Vector2s, DateTime> zone in lastSeen)
 			{
 				lines.Add($"zone {zone.Key.x} {zone.Key.y} {Format(zone.Value)}");
 			}
-			foreach (KeyValuePair<string, double> entry in depletedSince)
+			foreach (KeyValuePair<string, DateTime> entry in depletedSince)
 			{
 				lines.Add($"depleted {entry.Key} {Format(entry.Value)}");
 			}
@@ -103,23 +119,23 @@ namespace ResourceRegrowth
 			File.Move(temp, path);
 		}
 
-		public void MarkSeen(Vector2s zone, double day)
+		public void MarkSeen(Vector2s zone, DateTime now)
 		{
-			if (!lastSeen.TryGetValue(zone, out double previous) || previous < day)
+			if (!lastSeen.TryGetValue(zone, out DateTime previous) || previous < now)
 			{
-				lastSeen[zone] = day;
+				lastSeen[zone] = now;
 			}
 		}
 
-		public double LastSeen(Vector2s zone)
+		public DateTime LastSeen(Vector2s zone)
 		{
-			return lastSeen.TryGetValue(zone, out double day) ? day : FirstRunDay;
+			return lastSeen.TryGetValue(zone, out DateTime time) ? time : FirstRun;
 		}
 
 		// Returns since when the object has been depleted, recording now if this is the first sighting.
-		public double DepletedSince(string key, double now)
+		public DateTime DepletedSince(string key, DateTime now)
 		{
-			if (!depletedSince.TryGetValue(key, out double since))
+			if (!depletedSince.TryGetValue(key, out DateTime since))
 			{
 				since = now;
 				depletedSince[key] = since;
@@ -130,6 +146,18 @@ namespace ResourceRegrowth
 		public void Forget(string key)
 		{
 			depletedSince.Remove(key);
+		}
+
+		// A zone last seen before the cutoff counts as idle either way (LastSeen falls back to FirstRun, earlier still).
+		public void ForgetZonesSeenBefore(DateTime cutoff)
+		{
+			foreach (Vector2s zone in new List<Vector2s>(lastSeen.Keys))
+			{
+				if (lastSeen[zone] < cutoff)
+				{
+					lastSeen.Remove(zone);
+				}
+			}
 		}
 
 		// Drops entries for objects that are no longer depleted or no longer exist.
@@ -149,14 +177,15 @@ namespace ResourceRegrowth
 			}
 		}
 
-		private static double Parse(string s)
+		private static DateTime Parse(string s)
 		{
-			return double.Parse(s, CultureInfo.InvariantCulture);
+			return DateTime.ParseExact(s, TimeFormat, CultureInfo.InvariantCulture,
+				DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal);
 		}
 
-		private static string Format(double d)
+		private static string Format(DateTime time)
 		{
-			return d.ToString("R", CultureInfo.InvariantCulture);
+			return time.ToUniversalTime().ToString(TimeFormat, CultureInfo.InvariantCulture);
 		}
 	}
 }

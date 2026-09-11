@@ -12,37 +12,48 @@ and it patches no game code.
 
 ## How it works
 
-Everything handled here stays in the world when it is used up and only changes state, so
-regrowing it means flipping that state back. Nothing is deleted or created by the plugin.
+Everything handled here stays in the world when it is used up, so regrowing it only changes
+the object's data. The plugin deletes and creates no objects.
 
 | What | Depleted when | Regrown by |
 |---|---|---|
 | Surtling core stand | the core was taken (`picked`) | setting `picked` back to false |
-| Treasure chest | vanilla filled it once and it is now empty | clearing `addedDefaultItems`; vanilla refills the chest the next time a player loads it |
+| Treasure chest | vanilla filled it once and it is now empty | filling it from the chest's own loot table, as vanilla does when the chest is first generated |
 | One-time spawner | its creature is gone | clearing the spawned link; vanilla spawns again the next time a player loads the area |
 
 Every `CheckIntervalMinutes` the plugin scans the world. An object is regrown only when all of these hold:
 
-- it has been depleted for `AfterDays` (per category);
-- no player has been near its zone for `IdleDays`;
+- it has been depleted for `AfterHours` (per category);
+- no player has been near its zone for `IdleHours`;
 - no player-built piece or tombstone lies within `PlayerBuildRadius`;
-- no connected player owns it.
+- it is not in use: no connected player owns it, and the server does not have it loaded.
+  Dedicated Simulation, for example, loads the zones around players on the server.
 
 A scan of a large world (165,000 objects) takes about 15 ms of work, spread over about 40 frames.
 
 ### Time
 
-All times are **in-game days**, counted by the world clock. On a dedicated server that clock
-only runs while at least one player is online. It also skips ahead when players sleep.
-
-One in-game day is 30 minutes of play. So regrowth follows how much the world is played, not
-how long the server is up: nothing regrows while the server is empty.
+All times are **real hours** (wall clock, UTC). They keep counting while nobody is online and
+while the server is stopped. The world clock would not work here: on a dedicated server it
+only runs while a player is online.
 
 The plugin cannot know what happened before it was installed. Both clocks start at its first
-run on a world, so nothing regrows until `IdleDays` and `AfterDays` have passed since then.
+run on a world, so nothing regrows until `IdleHours` and `AfterHours` have passed since then.
 
 What it remembers is kept in `<world>.regrowth.txt` next to the world save. That file records
 when players were last near each zone, and since when each object has been depleted.
+
+Objects are identified by prefab and position, because the game hands out new object ids on
+every world load.
+
+### Limitations
+
+- On a server where players own the objects around them (no server-side simulation), a spawner reset may
+  not reach a player who stays connected the whole time and already had that area loaded in the same
+  session. The game only sends a link, never its removal, so that player's game still thinks the creature
+  exists. The creature appears once they reconnect. With Dedicated Simulation the server owns these
+  objects, so this does not happen there.
+- A core stand or chest that some machine currently has loaded is left for a later pass.
 
 ## Install
 
@@ -60,13 +71,14 @@ set `DryRun = false`.
 | General | DryRun | true | only log, change nothing |
 | General | CheckIntervalMinutes | 10 | real minutes between scans |
 | General | LogDetailsPerPass | 20 | objects logged individually per category and scan |
-| Safety | IdleDays | 10 | in-game days since a player was near the zone |
-| Safety | PresenceRadiusZones | 1 | a player counts as near all zones (64 m) within this many of their own |
+| Safety | IdleHours | 5 | real hours since a player was near the zone |
+| Safety | PresenceRadiusZones | 2 | a player counts as near all zones (64 m) within this many of their own |
 | Safety | PlayerBuildRadius | 48 | metres around player-built pieces and tombstones that are never touched |
-| SurtlingCores | Enabled / AfterDays | true / 20 | |
+| SurtlingCores | Enabled / AfterHours | true / 10 | |
 | SurtlingCores | Prefabs | Pickable_SurtlingCoreStand | hide-when-picked, non-respawning pickables to restore |
-| TreasureChests | Enabled / AfterDays | true / 48 | |
-| DungeonMonsters | Enabled / AfterDays | true / 48 | |
+| TreasureChests | Enabled / AfterHours | true / 24 | |
+| TreasureChests | ExcludePrefabs | | chest prefabs never to refill, e.g. `TreasureChest_meadows_buried` |
+| DungeonMonsters | Enabled / AfterHours | true / 24 | |
 | DungeonMonsters | ExcludePrefabs | | spawner prefabs never to reset |
 
 ## Build

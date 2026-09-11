@@ -1,6 +1,7 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using UnityEngine;
@@ -8,18 +9,22 @@ using UnityEngine;
 namespace ResourceRegrowth
 {
 	/*
-		Soft regrowth: every object handled here stays in the world when it is used up and only
-		changes state, so regrowing it is flipping that state back. Nothing is deleted or created.
+		Soft regrowth: every object handled here stays in the world when it is used up, so
+		regrowing it only changes its data. No object is deleted or created.
 
 		- Surtling core stands (hide-when-picked pickables): ZDO "picked" back to false.
-		- Treasure chests: when empty, ZDO "addedDefaultItems" back to false; vanilla refills the
-		  chest with its loot table the next time it is loaded (Container.Awake).
+		- Treasure chests: when empty, the plugin fills them from the chest's own loot table, the
+		  way Container.AddDefaultItems does. Vanilla would only refill a chest on load when the
+		  loading machine already owns it, and ownership is handed out on a slower timer than
+		  objects are created, so the plugin does not leave that to chance.
 		- One-time creature spawners: once their creature is gone, the "spawned" connection is
 		  cleared; vanilla then spawns again when the area is next loaded (CreatureSpawner).
 
-		An object is regrown only when it has been depleted for AfterDays, no player has been near
-		its zone for IdleDays, there is no player-built piece or tombstone within PlayerBuildRadius,
-		and no connected player owns it.
+		An object is regrown only when it has been depleted for AfterHours, no player has been near
+		its zone for IdleHours, there is no player-built piece or tombstone within PlayerBuildRadius,
+		and it is not in use: no connected player owns it and the server does not have it loaded
+		(Dedicated Simulation loads zones around players on the server). Changing an object that is
+		loaded somewhere would not show until it is reloaded, or would act at once (a spawner).
 	*/
 	internal class Regrowth
 	{
@@ -27,7 +32,17 @@ namespace ResourceRegrowth
 
 		private class Tally
 		{
-			public int depleted, waiting, blocked, busy, regrown, logged;
+			public int depleted, waiting, blocked, inUse, regrown, logged;
+		}
+
+		// ZDO instances are pooled and reused after an object is destroyed, so a candidate keeps
+		// the id and prefab it had when collected and is dropped if either no longer matches.
+		private struct Candidate
+		{
+			public Kind kind;
+			public ZDO zdo;
+			public ZDOID uid;
+			public int prefab;
 		}
 
 		private const float PresenceIntervalSeconds = 10f;
@@ -36,8 +51,8 @@ namespace ResourceRegrowth
 		private readonly MonoBehaviour host;
 		private readonly Settings settings;
 		private RegrowthState state;
-		private readonly HashSet<int> corePrefabs = new HashSet<int>();
-		private readonly HashSet<int> chestPrefabs = new HashSet<int>();
+		private readonly Dictionary<int, bool> corePrefabs = new Dictionary<int, bool>(); // prefab -> picked by default
+		private readonly Dictionary<int, Container> chestPrefabs = new Dictionary<int, Container>();
 		private readonly HashSet<int> spawnerPrefabs = new HashSet<int>();
 		private readonly HashSet<int> piecePrefabs = new HashSet<int>();
 		private readonly HashSet<int> tombstonePrefabs = new HashSet<int>();
@@ -56,12 +71,13 @@ namespace ResourceRegrowth
 		{
 			BuildPrefabSets();
 			state = new RegrowthState(StatePath());
-			state.Load(Now());
+			DateTime now = Now();
+			state.Load(now);
 			passTimer = 60f;
 			RegrowthPlugin.Log.LogInfo(
 				$"Active{(settings.DryRun.Value ? " (dry run: nothing will be changed)" : "")}. "
 				+ $"Surtling core stands: {corePrefabs.Count} prefab(s), treasure chests: {chestPrefabs.Count}, one-time spawners: {spawnerPrefabs.Count}. "
-				+ $"Tracking since in-game day {state.FirstRunDay:0.#}, now day {Now():0.#}. State: {state.FilePath}");
+				+ $"Tracking since {state.FirstRun.ToLocalTime():yyyy-MM-dd HH:mm} ({Hours(state.FirstRun, now):0.#} h ago). State: {state.FilePath}");
 		}
 
 		public void Stop()
@@ -90,10 +106,14 @@ namespace ResourceRegrowth
 			}
 		}
 
-		private static double Now()
+		private static DateTime Now()
 		{
-			float dayLength = EnvMan.instance ? EnvMan.instance.m_dayLengthSec : 1800f;
-			return ZNet.instance.GetTimeSeconds() / dayLength;
+			return DateTime.UtcNow;
+		}
+
+		private static double Hours(DateTime from, DateTime to)
+		{
+			return (to - from).TotalHours;
 		}
 
 		private static string StatePath()
@@ -117,6 +137,7 @@ namespace ResourceRegrowth
 		private void BuildPrefabSets()
 		{
 			HashSet<string> cores = SplitList(settings.CorePrefabs.Value);
+			HashSet<string> excludedChests = SplitList(settings.ChestsExclude.Value);
 			HashSet<string> excludedSpawners = SplitList(settings.SpawnersExclude.Value);
 			foreach (GameObject prefab in ZNetScene.instance.m_prefabs)
 			{
@@ -139,17 +160,24 @@ namespace ResourceRegrowth
 					Pickable pickable = prefab.GetComponent<Pickable>();
 					if (pickable && pickable.m_hideWhenPicked && pickable.m_respawnTimeMinutes <= 0f)
 					{
-						corePrefabs.Add(hash);
+						corePrefabs[hash] = pickable.m_defaultPicked;
 					}
 					else
 					{
 						RegrowthPlugin.Log.LogWarning($"{prefab.name} is not a non-respawning hide-when-picked pickable; ignored.");
 					}
 				}
-				Container container = prefab.GetComponent<Container>();
-				if (container && prefab.name.StartsWith("TreasureChest_", StringComparison.Ordinal) && container.m_defaultItems.m_drops.Count > 0)
+				if (prefab.name.StartsWith("TreasureChest_", StringComparison.Ordinal) && !excludedChests.Contains(prefab.name))
 				{
-					chestPrefabs.Add(hash);
+					Container container = prefab.GetComponent<Container>();
+					if (container && !container.m_rootObjectOverride && container.m_defaultItems.m_drops.Count > 0)
+					{
+						chestPrefabs[hash] = container;
+					}
+					else
+					{
+						RegrowthPlugin.Log.LogInfo($"{prefab.name} has no container with a loot table of its own; ignored.");
+					}
 				}
 				CreatureSpawner spawner = prefab.GetComponent<CreatureSpawner>();
 				if (spawner && spawner.m_respawnTimeMinuts <= 0f && !excludedSpawners.Contains(prefab.name))
@@ -166,10 +194,15 @@ namespace ResourceRegrowth
 
 		private void RecordPresence()
 		{
-			double now = Now();
+			DateTime now = Now();
 			int radius = Mathf.Max(0, settings.PresenceRadiusZones.Value);
 			foreach (ZNetPeer peer in ZNet.instance.GetPeers())
 			{
+				// Only players in the world: a peer still connecting or loading has no real position yet.
+				if (!peer.IsReady() || peer.m_characterID.IsNone())
+				{
+					continue;
+				}
 				Vector2s zone = ZoneSystem.GetZone(peer.GetRefPos());
 				for (int dy = -radius; dy <= radius; dy++)
 				{
@@ -181,119 +214,172 @@ namespace ResourceRegrowth
 			}
 		}
 
+		// On shutdown ZDOMan empties its objects before the plugin is told; a pass must then not
+		// conclude that nothing is depleted any more and throw the clocks away.
+		private static bool WorldLoaded()
+		{
+			return ZNet.instance && ZNet.instance.enabled && ZDOMan.instance != null && ZDOMan.instance.m_objectsByID.Count > 0;
+		}
+
 		private IEnumerator Pass()
 		{
-			double now = Now();
-			bool dryRun = settings.DryRun.Value;
-			// Wall time includes the frames in between; work time is only what this pass itself took.
-			System.Diagnostics.Stopwatch wall = System.Diagnostics.Stopwatch.StartNew();
-			System.Diagnostics.Stopwatch work = System.Diagnostics.Stopwatch.StartNew();
-			int frames = 1;
-			List<ZDO> zdos = new List<ZDO>(ZDOMan.instance.m_objectsByID.Values);
-			Dictionary<Vector2s, List<Vector3>> blockers = new Dictionary<Vector2s, List<Vector3>>();
-			List<KeyValuePair<Kind, ZDO>> candidates = new List<KeyValuePair<Kind, ZDO>>();
+			// Whatever goes wrong inside, the next pass must still be able to start.
+			try
+			{
+				DateTime now = Now();
+				bool dryRun = settings.DryRun.Value;
+				// Wall time includes the frames in between; work time is only what this pass itself took.
+				System.Diagnostics.Stopwatch wall = System.Diagnostics.Stopwatch.StartNew();
+				System.Diagnostics.Stopwatch work = System.Diagnostics.Stopwatch.StartNew();
+				int frames = 1;
+				List<ZDO> zdos = new List<ZDO>(ZDOMan.instance.m_objectsByID.Values);
+				Dictionary<Vector2s, List<Vector3>> blockers = new Dictionary<Vector2s, List<Vector3>>();
+				List<Candidate> candidates = new List<Candidate>();
 
-			// 1. One pass over every object: note player builds and tombstones, collect candidates.
-			for (int i = 0; i < zdos.Count; i++)
-			{
-				ZDO zdo = zdos[i];
-				int prefab = zdo.GetPrefab();
-				if (tombstonePrefabs.Contains(prefab)
-					|| (piecePrefabs.Contains(prefab) && zdo.GetLong(ZDOVars.s_creator, 0L) != 0L))
+				// 1. One pass over every object: note player builds and tombstones, collect candidates.
+				for (int i = 0; i < zdos.Count; i++)
 				{
-					AddBlocker(blockers, zdo.GetPosition());
+					ZDO zdo = zdos[i];
+					int prefab = zdo.GetPrefab();
+					if (tombstonePrefabs.Contains(prefab)
+						|| (piecePrefabs.Contains(prefab) && zdo.GetLong(ZDOVars.s_creator, 0L) != 0L))
+					{
+						AddBlocker(blockers, zdo.GetPosition());
+					}
+					if (settings.CoresEnabled.Value && corePrefabs.ContainsKey(prefab))
+					{
+						candidates.Add(new Candidate { kind = Kind.Core, zdo = zdo, uid = zdo.m_uid, prefab = prefab });
+					}
+					else if (settings.ChestsEnabled.Value && chestPrefabs.ContainsKey(prefab))
+					{
+						candidates.Add(new Candidate { kind = Kind.Chest, zdo = zdo, uid = zdo.m_uid, prefab = prefab });
+					}
+					else if (settings.SpawnersEnabled.Value && spawnerPrefabs.Contains(prefab))
+					{
+						candidates.Add(new Candidate { kind = Kind.Spawner, zdo = zdo, uid = zdo.m_uid, prefab = prefab });
+					}
+					if (i % ScanBatch == ScanBatch - 1)
+					{
+						frames++;
+						work.Stop();
+						yield return null;
+						work.Start();
+					}
 				}
-				if (settings.CoresEnabled.Value && corePrefabs.Contains(prefab))
+				if (!WorldLoaded())
 				{
-					candidates.Add(new KeyValuePair<Kind, ZDO>(Kind.Core, zdo));
+					yield break;
 				}
-				else if (settings.ChestsEnabled.Value && chestPrefabs.Contains(prefab))
-				{
-					candidates.Add(new KeyValuePair<Kind, ZDO>(Kind.Chest, zdo));
-				}
-				else if (settings.SpawnersEnabled.Value && spawnerPrefabs.Contains(prefab))
-				{
-					candidates.Add(new KeyValuePair<Kind, ZDO>(Kind.Spawner, zdo));
-				}
-				if (i % ScanBatch == ScanBatch - 1)
-				{
-					frames++;
-					work.Stop();
-					yield return null;
-					work.Start();
-				}
-			}
 
-			// 2. Decide for each candidate.
-			Dictionary<Kind, Tally> tallies = new Dictionary<Kind, Tally>
-			{
-				{ Kind.Core, new Tally() }, { Kind.Chest, new Tally() }, { Kind.Spawner, new Tally() },
-			};
-			HashSet<string> stillDepleted = new HashSet<string>();
-			foreach (KeyValuePair<Kind, ZDO> candidate in candidates)
-			{
-				Kind kind = candidate.Key;
-				ZDO zdo = candidate.Value;
-				if (ZDOMan.instance.GetZDO(zdo.m_uid) != zdo || !IsDepleted(kind, zdo))
+				// 2. Decide for each candidate, all in this frame.
+				Dictionary<Kind, Tally> tallies = new Dictionary<Kind, Tally>
 				{
-					continue;
+					{ Kind.Core, new Tally() }, { Kind.Chest, new Tally() }, { Kind.Spawner, new Tally() },
+				};
+				HashSet<string> stillDepleted = new HashSet<string>();
+				HashSet<string> regrown = new HashSet<string>();
+				int errors = 0;
+				foreach (Candidate candidate in candidates)
+				{
+					try
+					{
+						Decide(candidate, now, dryRun, blockers, tallies[candidate.kind], stillDepleted, regrown);
+					}
+					catch (Exception e)
+					{
+						if (errors++ == 0)
+						{
+							RegrowthPlugin.Log.LogWarning($"Skipped {Describe(candidate.kind)} {Name(candidate.prefab)}: {e}");
+						}
+					}
 				}
-				Tally tally = tallies[kind];
-				tally.depleted++;
-				string key = $"{kind}:{zdo.m_uid.UserID}:{zdo.m_uid.ID}";
-				stillDepleted.Add(key);
-				double since = state.DepletedSince(key, now);
-				Vector3 position = zdo.GetPosition();
-				double idle = now - state.LastSeen(ZoneSystem.GetZone(position));
-				if (now - since < AfterDays(kind) || idle < settings.IdleDays.Value)
+				// Forgotten only now: objects that share a key (same prefab and spot) share the clock too.
+				foreach (string key in regrown)
 				{
-					tally.waiting++;
-					continue;
-				}
-				if (IsBlocked(blockers, position))
-				{
-					tally.blocked++;
-					continue;
-				}
-				if (!OwnerIsFree(zdo))
-				{
-					tally.busy++;
-					continue;
-				}
-				tally.regrown++;
-				if (tally.logged < settings.LogDetailsPerPass.Value)
-				{
-					tally.logged++;
-					RegrowthPlugin.Log.LogInfo(
-						$"{(dryRun ? "Would regrow" : "Regrew")} {Describe(kind)} {Name(zdo)} at {position.x:0},{position.z:0}{(position.y > 3000f ? " (dungeon)" : "")}: "
-						+ $"depleted {now - since:0.#} days, area idle {idle:0.#} days.");
-				}
-				if (!dryRun)
-				{
-					Apply(kind, zdo);
 					state.Forget(key);
 					stillDepleted.Remove(key);
 				}
-			}
-			state.KeepOnly(stillDepleted);
+				state.KeepOnly(stillDepleted);
+				state.ForgetZonesSeenBefore(now.AddHours(-Math.Max(0f, settings.IdleHours.Value)));
 
-			RegrowthPlugin.Log.LogInfo(
-				$"Pass at day {now:0.#}{(dryRun ? " (dry run)" : "")}: "
-				+ string.Join("; ", tallies.Select(t =>
-					$"{Describe(t.Key)}s {t.Value.depleted} depleted ({t.Value.waiting} waiting, {t.Value.blocked} near player builds, {t.Value.busy} owned by a player, "
-					+ $"{t.Value.regrown} {(dryRun ? "would regrow" : "regrown")})"))
-				+ $". Scanned {zdos.Count} objects: {work.ElapsedMilliseconds} ms of work spread over {frames} frames ({wall.ElapsedMilliseconds} ms wall).");
-			SaveState();
-			running = null;
+				RegrowthPlugin.Log.LogInfo(
+					$"Pass{(dryRun ? " (dry run)" : "")}: "
+					+ string.Join("; ", tallies.Select(t =>
+						$"{Describe(t.Key)}s {t.Value.depleted} depleted ({t.Value.waiting} waiting, {t.Value.blocked} near player builds, {t.Value.inUse} in use, "
+						+ $"{t.Value.regrown} {(dryRun ? "would regrow" : "regrown")})"))
+					+ $". Scanned {zdos.Count} objects: {work.ElapsedMilliseconds} ms of work spread over {frames} frames ({wall.ElapsedMilliseconds} ms wall)."
+					+ (errors > 0 ? $" {errors} object(s) skipped after errors." : ""));
+				SaveState();
+			}
+			finally
+			{
+				running = null;
+			}
 		}
 
-		private float AfterDays(Kind kind)
+		private void Decide(Candidate candidate, DateTime now, bool dryRun, Dictionary<Vector2s, List<Vector3>> blockers,
+			Tally tally, HashSet<string> stillDepleted, HashSet<string> regrown)
+		{
+			ZDO zdo = candidate.zdo;
+			if (ZDOMan.instance.GetZDO(candidate.uid) != zdo || zdo.GetPrefab() != candidate.prefab || !IsDepleted(candidate.kind, zdo))
+			{
+				return;
+			}
+			tally.depleted++;
+			string key = Key(candidate.kind, zdo);
+			stillDepleted.Add(key);
+			double depleted = Hours(state.DepletedSince(key, now), now);
+			Vector3 position = zdo.GetPosition();
+			double idle = Hours(state.LastSeen(ZoneSystem.GetZone(position)), now);
+			if (depleted < AfterHours(candidate.kind) || idle < settings.IdleHours.Value)
+			{
+				tally.waiting++;
+				return;
+			}
+			if (IsBlocked(blockers, position))
+			{
+				tally.blocked++;
+				return;
+			}
+			if (InUse(zdo))
+			{
+				tally.inUse++;
+				return;
+			}
+			tally.regrown++;
+			if (tally.logged < settings.LogDetailsPerPass.Value)
+			{
+				tally.logged++;
+				RegrowthPlugin.Log.LogInfo(
+					$"{(dryRun ? "Would regrow" : "Regrew")} {Describe(candidate.kind)} {Name(candidate.prefab)} at {position.x:0},{position.z:0}{(position.y > 3000f ? " (dungeon)" : "")}: "
+					+ $"depleted {depleted:0.##} h, area idle {idle:0.##} h.");
+			}
+			if (!dryRun)
+			{
+				Apply(candidate.kind, zdo);
+				regrown.Add(key);
+			}
+		}
+
+		/*
+			ZDO ids are handed out afresh on every world load (ZDO.Load), so they cannot identify an
+			object across restarts. Everything handled here stays where the world put it, so prefab and
+			position do.
+		*/
+		private string Key(Kind kind, ZDO zdo)
+		{
+			Vector3 p = zdo.GetPosition();
+			return string.Format(CultureInfo.InvariantCulture, "{0}:{1}:{2:0.0}:{3:0.0}:{4:0.0}",
+				kind, Name(zdo.GetPrefab()).Replace(' ', '_'), p.x, p.y, p.z);
+		}
+
+		private float AfterHours(Kind kind)
 		{
 			switch (kind)
 			{
-				case Kind.Core: return settings.CoresAfterDays.Value;
-				case Kind.Chest: return settings.ChestsAfterDays.Value;
-				default: return settings.SpawnersAfterDays.Value;
+				case Kind.Core: return settings.CoresAfterHours.Value;
+				case Kind.Chest: return settings.ChestsAfterHours.Value;
+				default: return settings.SpawnersAfterHours.Value;
 			}
 		}
 
@@ -307,17 +393,17 @@ namespace ResourceRegrowth
 			}
 		}
 
-		private string Name(ZDO zdo)
+		private string Name(int prefab)
 		{
-			return prefabNames.TryGetValue(zdo.GetPrefab(), out string name) ? name : zdo.GetPrefab().ToString();
+			return prefabNames.TryGetValue(prefab, out string name) ? name : prefab.ToString();
 		}
 
-		private static bool IsDepleted(Kind kind, ZDO zdo)
+		private bool IsDepleted(Kind kind, ZDO zdo)
 		{
 			switch (kind)
 			{
 				case Kind.Core:
-					return zdo.GetBool(ZDOVars.s_picked);
+					return zdo.GetBool(ZDOVars.s_picked, corePrefabs[zdo.GetPrefab()]);
 				case Kind.Chest:
 					return IsLootedChest(zdo);
 				default:
@@ -330,29 +416,25 @@ namespace ResourceRegrowth
 
 		private static bool IsLootedChest(ZDO zdo)
 		{
-			// Player-built chests are never touched, and a chest vanilla has not filled yet is not looted.
-			if (zdo.GetLong(ZDOVars.s_creator, 0L) != 0L || !zdo.GetBool(ZDOVars.s_addedDefaultItems))
+			// Player-built chests are never touched, a chest vanilla has not filled yet is not looted,
+			// and chests from cheats are left alone.
+			if (zdo.GetLong(ZDOVars.s_creator, 0L) != 0L || !zdo.GetBool(ZDOVars.s_addedDefaultItems) || zdo.GetBool(ZDOVars.s_cheated))
 			{
 				return false;
 			}
-			string items = zdo.GetString(ZDOVars.s_items);
-			if (string.IsNullOrEmpty(items))
+			// Container.Save stores the inventory as a byte array (Inventory.Save): version, then item count.
+			byte[] items = zdo.GetByteArray(ZDOVars.s_items);
+			if (items == null)
 			{
 				return true;
 			}
-			try
-			{
-				Inventory inventory = new Inventory("", null, 8, 8);
-				inventory.Load(new ZPackage(items), false);
-				return inventory.NrOfItems() == 0;
-			}
-			catch (Exception)
-			{
-				return false;
-			}
+			ZPackage package = new ZPackage(items);
+			int version = package.ReadInt();
+			int count = version >= (int)Version.Item.Smaller ? package.ReadUShort() : package.ReadInt();
+			return count == 0;
 		}
 
-		private static void Apply(Kind kind, ZDO zdo)
+		private void Apply(Kind kind, ZDO zdo)
 		{
 			switch (kind)
 			{
@@ -360,7 +442,7 @@ namespace ResourceRegrowth
 					zdo.Set(ZDOVars.s_picked, false);
 					break;
 				case Kind.Chest:
-					zdo.Set(ZDOVars.s_addedDefaultItems, false);
+					Refill(zdo, chestPrefabs[zdo.GetPrefab()]);
 					break;
 				default:
 					zdo.SetConnection(ZDOExtraData.ConnectionType.None, ZDOID.None);
@@ -368,10 +450,28 @@ namespace ResourceRegrowth
 			}
 		}
 
-		private static bool OwnerIsFree(ZDO zdo)
+		// What Container.AddDefaultItems and Container.Save do, done on the ZDO directly.
+		private static void Refill(ZDO zdo, Container prefab)
 		{
+			Inventory inventory = new Inventory(prefab.m_name, prefab.m_bkg, prefab.m_width, prefab.m_height);
+			foreach (ItemDrop.ItemData item in prefab.m_defaultItems.GetDropListItems())
+			{
+				inventory.AddItem(item);
+			}
+			ZPackage package = new ZPackage();
+			inventory.Save(package);
+			zdo.Set(ZDOVars.s_items, package.GetArray());
+			zdo.Set(ZDOVars.s_addedDefaultItems, true);
+		}
+
+		private static bool InUse(ZDO zdo)
+		{
+			if (ZNetScene.instance.FindInstance(zdo))
+			{
+				return true;
+			}
 			long owner = zdo.GetOwner();
-			return owner == 0L || owner == ZDOMan.GetSessionID() || ZNet.instance.GetPeer(owner) == null;
+			return owner != 0L && owner != ZDOMan.GetSessionID() && ZNet.instance.GetPeer(owner) != null;
 		}
 
 		private static void AddBlocker(Dictionary<Vector2s, List<Vector3>> blockers, Vector3 position)
