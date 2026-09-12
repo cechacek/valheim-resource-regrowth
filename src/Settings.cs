@@ -9,6 +9,8 @@ namespace ResourceRegrowth
 	*/
 	internal class Settings
 	{
+		private readonly ConfigFile file;
+
 		public readonly ConfigEntry<bool> Enabled;
 		public readonly ConfigEntry<bool> DryRun;
 		public readonly ConfigEntry<float> CheckIntervalMinutes;
@@ -32,6 +34,7 @@ namespace ResourceRegrowth
 
 		public Settings(ConfigFile config)
 		{
+			file = config;
 			Enabled = config.Bind("General", "Enabled", true, "Enable or disable the plugin.");
 			DryRun = config.Bind("General", "DryRun", true,
 				"Only log what would be regrown, change nothing. Leave on until the log looks right.");
@@ -67,6 +70,20 @@ namespace ResourceRegrowth
 				"Real hours after the plugin first saw the spawner's creature gone.");
 			SpawnersExclude = config.Bind("DungeonMonsters", "ExcludePrefabs", "",
 				"Spawner prefabs never to reset. Comma separated.");
+		}
+
+		// Re-reads the file so DryRun and the delays can be changed without a restart.
+		// (Enabled, prefab lists and exclusions still need one: they are applied when the plugin starts.)
+		public void Reload()
+		{
+			try
+			{
+				file.Reload();
+			}
+			catch (System.Exception e)
+			{
+				RegrowthPlugin.Log.LogWarning($"Could not re-read the config, keeping the current settings: {e.Message}");
+			}
 		}
 	}
 }

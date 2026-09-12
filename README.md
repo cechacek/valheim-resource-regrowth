@@ -61,7 +61,9 @@ Copy `SarkasticEU_Resource_Regrowth.dll` to `BepInEx/plugins/` on the server and
 That creates `BepInEx/config/sarkasticeu.resource_regrowth.cfg`.
 
 It starts in **dry run**: it only logs what it would regrow. Watch the log for a few passes, then
-set `DryRun = false`.
+set `DryRun = false`. The config file is re-read before every pass, so `DryRun`, the delays and
+the logging amount change without a restart; `Enabled`, the prefab lists and the exclusions are
+applied at startup.
 
 ## Configuration
 

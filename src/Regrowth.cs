@@ -101,6 +101,12 @@ namespace ResourceRegrowth
 			passTimer -= dt;
 			if (passTimer <= 0f && running == null)
 			{
+				bool wasDryRun = settings.DryRun.Value;
+				settings.Reload();
+				if (settings.DryRun.Value != wasDryRun)
+				{
+					RegrowthPlugin.Log.LogInfo(settings.DryRun.Value ? "Dry run switched on: nothing will be changed." : "Dry run switched off: regrowth is live.");
+				}
 				passTimer = Mathf.Max(1f, settings.CheckIntervalMinutes.Value) * 60f;
 				running = host.StartCoroutine(Pass());
 			}
