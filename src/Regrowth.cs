@@ -306,6 +306,12 @@ namespace ResourceRegrowth
 					stillDepleted.Remove(key);
 				}
 				state.KeepOnly(stillDepleted);
+				// The world changed and the clocks were reset; a crash before the next autosave would
+				// lose the one and keep the other, so save now (the same call as the autosave).
+				if (regrown.Count > 0 && ZNet.instance.EnoughDiskSpaceAvailable(out bool _))
+				{
+					ZNet.instance.Save(sync: false, saveOtherPlayerProfiles: true, waitForNextFrame: true);
+				}
 				state.ForgetZonesSeenBefore(now.AddHours(-Math.Max(0f, settings.IdleHours.Value)));
 
 				RegrowthPlugin.Log.LogInfo(
@@ -314,7 +320,8 @@ namespace ResourceRegrowth
 						$"{Describe(t.Key)}s {t.Value.depleted} depleted ({t.Value.waiting} waiting, {t.Value.blocked} near player builds, {t.Value.inUse} in use, "
 						+ $"{t.Value.regrown} {(dryRun ? "would regrow" : "regrown")})"))
 					+ $". Scanned {zdos.Count} objects: {work.ElapsedMilliseconds} ms of work spread over {frames} frames ({wall.ElapsedMilliseconds} ms wall)."
-					+ (errors > 0 ? $" {errors} object(s) skipped after errors." : ""));
+					+ (errors > 0 ? $" {errors} object(s) skipped after errors." : "")
+					+ (regrown.Count > 0 ? " World save requested." : ""));
 				SaveState();
 			}
 			finally

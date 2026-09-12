@@ -40,6 +40,9 @@ only runs while a player is online.
 The plugin cannot know what happened before it was installed. Both clocks start at its first
 run on a world, so nothing regrows until `IdleHours` and `AfterHours` have passed since then.
 
+After a pass that regrew anything the world is saved right away (the same call as the autosave), so
+a crash cannot lose the regrowth while keeping the reset clocks.
+
 What it remembers is kept in `<world>.regrowth.txt` next to the world save. That file records
 when players were last near each zone, and since when each object has been depleted.
 
