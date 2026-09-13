@@ -32,6 +32,16 @@ namespace ResourceRegrowth
 		public readonly ConfigEntry<float> SpawnersAfterHours;
 		public readonly ConfigEntry<string> SpawnersExclude;
 
+		public readonly ConfigEntry<bool> TerrainEnabled;
+		public readonly ConfigEntry<float> TerrainAfterHours;
+		public readonly ConfigEntry<float> TerrainStepHours;
+		public readonly ConfigEntry<float> TerrainDivider;
+		public readonly ConfigEntry<float> TerrainMinDelta;
+		public readonly ConfigEntry<bool> TerrainKeepPaved;
+		public readonly ConfigEntry<bool> TerrainKeepCultivated;
+		public readonly ConfigEntry<float> TerrainProtectMultiplier;
+		public readonly ConfigEntry<float> TerrainProtectPiecesRadius;
+
 		public Settings(ConfigFile config)
 		{
 			file = config;
@@ -70,6 +80,25 @@ namespace ResourceRegrowth
 				"Real hours after the plugin first saw the spawner's creature gone.");
 			SpawnersExclude = config.Bind("DungeonMonsters", "ExcludePrefabs", "",
 				"Spawner prefabs never to reset. Comma separated.");
+
+			TerrainEnabled = config.Bind("Terrain", "Enabled", true,
+				"Let dug, raised, levelled and paved ground slowly return to the land's own shape once the area has been left alone. Ground around a player base (anything the game counts as a base: workbench, forge, stonecutter ... and wards) is left as it is; when the base is gone, so is the protection.");
+			TerrainAfterHours = config.Bind("Terrain", "AfterHours", 48f,
+				"Real hours after the plugin first saw a zone's ground modified before the first step.");
+			TerrainStepHours = config.Bind("Terrain", "StepHours", 24f,
+				"Real hours between steps for one zone. Each step divides what is left by Divider, so with 1.7 a 4 m hole is 2.4 m after the first step, 1.4 after the second, 0.8, 0.5, 0.3, gone.");
+			TerrainDivider = config.Bind("Terrain", "Divider", 1.7f,
+				"Each step divides the remaining height change by this.");
+			TerrainMinDelta = config.Bind("Terrain", "MinDelta", 0.2f,
+				"A height change smaller than this (metres) is dropped to zero.");
+			TerrainKeepPaved = config.Bind("Terrain", "KeepPaved", true,
+				"Leave paved ground paved (roads, floors); only its height returns.");
+			TerrainKeepCultivated = config.Bind("Terrain", "KeepCultivated", true,
+				"Leave cultivated ground cultivated (fields).");
+			TerrainProtectMultiplier = config.Bind("Terrain", "ProtectMultiplier", 1f,
+				"The protected radius around a base object or ward is its own radius times this.");
+			TerrainProtectPiecesRadius = config.Bind("Terrain", "ProtectPiecesRadius", 0f,
+				"Also protect this many metres around any player-built piece or tombstone (0 = only bases and wards). The same list of pieces as PlayerBuildRadius uses.");
 		}
 
 		// Re-reads the file so DryRun and the delays can be changed without a restart.

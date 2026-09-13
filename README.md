@@ -6,6 +6,8 @@ It brings one-time world content back once an area has been left alone for a whi
 - **Surtling core stands** get their core back.
 - **Treasure chests** (never player-built ones) are refilled with their normal loot.
 - **One-time creature spawners** (dungeons, camps, caves) spawn their creature again.
+- **Terrain** that players dug, raised, levelled or paved slowly returns to the land's own shape,
+  except around player bases and wards.
 
 Players need nothing: vanilla clients work. The plugin depends on BepInEx and nothing else,
 and it patches no game code.
@@ -20,6 +22,7 @@ the object's data. The plugin deletes and creates no objects.
 | Surtling core stand | the core was taken (`picked`) | setting `picked` back to false |
 | Treasure chest | vanilla filled it once and it is now empty | filling it from the chest's own loot table, as vanilla does when the chest is first generated |
 | One-time spawner | its creature is gone | clearing the spawned link; vanilla spawns again the next time a player loads the area |
+| Terrain (a zone's `_TerrainCompiler`) | any vertex of the zone's heightmap is modified or painted | a step every `StepHours`: every height change outside a protected area is divided by `Divider` (1.7) and dropped once below `MinDelta`; paint goes back to nothing once the height under it is back, except paved and cultivated ground. The data is written in the game's own format; loaded terrain reloads it and every client rebuilds the ground. |
 
 Every `CheckIntervalMinutes` the plugin scans the world. An object is regrown only when all of these hold:
 
@@ -30,6 +33,17 @@ Every `CheckIntervalMinutes` the plugin scans the world. An object is regrown on
   Dedicated Simulation, for example, loads the zones around players on the server.
 
 A scan of a large world (165,000 objects) takes about 15 ms of work, spread over about 40 frames.
+
+### Terrain protection
+
+Ground within the radius of a **player base object** -- anything the game itself treats as a base
+when it decides where creatures may not spawn (a PlayerBase effect area: workbench, forge,
+stonecutter, beds, fires ...) -- or of a **ward** is left as it is; the radius is the object's own
+(`ProtectMultiplier` scales it). A base that is gone, say a workbench broken by creatures, protects
+nothing any more, and the land returns. `ProtectPiecesRadius` (0) adds a radius around every
+player-built piece and tombstone for those who want roads and fields kept whole; paved and
+cultivated paint is kept anyway (`KeepPaved`, `KeepCultivated`), only its height returns. The log
+lists the protecting kinds and their radii at start.
 
 ### Time
 

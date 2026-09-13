@@ -148,6 +148,11 @@ namespace ResourceRegrowth
 			depletedSince.Remove(key);
 		}
 
+		public bool HasKey(string key)
+		{
+			return depletedSince.ContainsKey(key);
+		}
+
 		// A zone last seen before the cutoff counts as idle either way (LastSeen falls back to FirstRun, earlier still).
 		public void ForgetZonesSeenBefore(DateTime cutoff)
 		{

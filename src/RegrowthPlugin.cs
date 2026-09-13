@@ -13,7 +13,7 @@ namespace ResourceRegrowth
 	{
 		public const string GUID = "sarkasticeu.resource_regrowth";
 		public const string PluginName = "Sarkastic.eu Resource Regrowth";
-		public const string PluginVersion = "0.3.0";
+		public const string PluginVersion = "0.4.0";
 
 		internal static ManualLogSource Log;
 

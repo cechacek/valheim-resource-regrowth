@@ -28,7 +28,7 @@ namespace ResourceRegrowth
 	*/
 	internal class Regrowth
 	{
-		private enum Kind { Core, Chest, Spawner }
+		private enum Kind { Core, Chest, Spawner, Terrain }
 
 		private class Tally
 		{
@@ -56,6 +56,8 @@ namespace ResourceRegrowth
 		private readonly HashSet<int> spawnerPrefabs = new HashSet<int>();
 		private readonly HashSet<int> piecePrefabs = new HashSet<int>();
 		private readonly HashSet<int> tombstonePrefabs = new HashSet<int>();
+		private readonly int terrainPrefab = Terrain.CompilerPrefab.GetStableHashCode();
+		private Dictionary<int, float> protectorPrefabs = new Dictionary<int, float>();
 		private readonly Dictionary<int, string> prefabNames = new Dictionary<int, string>();
 		private float presenceTimer;
 		private float passTimer;
@@ -70,6 +72,8 @@ namespace ResourceRegrowth
 		public void Start()
 		{
 			BuildPrefabSets();
+			protectorPrefabs = Terrain.ProtectorPrefabs(settings.TerrainProtectMultiplier.Value, out List<string> protectorNames);
+			RegrowthPlugin.Log.LogInfo($"Terrain{(settings.TerrainEnabled.Value ? "" : " (off)")}: ground is protected around {protectorPrefabs.Count} kinds of base object and ward: {string.Join(", ", protectorNames)}");
 			state = new RegrowthState(StatePath());
 			DateTime now = Now();
 			state.Load(now);
@@ -240,6 +244,7 @@ namespace ResourceRegrowth
 				int frames = 1;
 				List<ZDO> zdos = new List<ZDO>(ZDOMan.instance.m_objectsByID.Values);
 				Dictionary<Vector2s, List<Vector3>> blockers = new Dictionary<Vector2s, List<Vector3>>();
+				Dictionary<Vector2s, List<Terrain.Protector>> protectors = new Dictionary<Vector2s, List<Terrain.Protector>>();
 				List<Candidate> candidates = new List<Candidate>();
 
 				// 1. One pass over every object: note player builds and tombstones, collect candidates.
@@ -252,6 +257,10 @@ namespace ResourceRegrowth
 					{
 						AddBlocker(blockers, zdo.GetPosition());
 					}
+					if (protectorPrefabs.TryGetValue(prefab, out float protectRadius) && zdo.GetLong(ZDOVars.s_creator, 0L) != 0L && zdo.GetBool(ZDOVars.s_enabled, true))
+					{
+						AddProtector(protectors, zdo.GetPosition(), protectRadius);
+					}
 					if (settings.CoresEnabled.Value && corePrefabs.ContainsKey(prefab))
 					{
 						candidates.Add(new Candidate { kind = Kind.Core, zdo = zdo, uid = zdo.m_uid, prefab = prefab });
@@ -263,6 +272,10 @@ namespace ResourceRegrowth
 					else if (settings.SpawnersEnabled.Value && spawnerPrefabs.Contains(prefab))
 					{
 						candidates.Add(new Candidate { kind = Kind.Spawner, zdo = zdo, uid = zdo.m_uid, prefab = prefab });
+					}
+					else if (settings.TerrainEnabled.Value && prefab == terrainPrefab)
+					{
+						candidates.Add(new Candidate { kind = Kind.Terrain, zdo = zdo, uid = zdo.m_uid, prefab = prefab });
 					}
 					if (i % ScanBatch == ScanBatch - 1)
 					{
@@ -280,8 +293,9 @@ namespace ResourceRegrowth
 				// 2. Decide for each candidate, all in this frame.
 				Dictionary<Kind, Tally> tallies = new Dictionary<Kind, Tally>
 				{
-					{ Kind.Core, new Tally() }, { Kind.Chest, new Tally() }, { Kind.Spawner, new Tally() },
+					{ Kind.Core, new Tally() }, { Kind.Chest, new Tally() }, { Kind.Spawner, new Tally() }, { Kind.Terrain, new Tally() },
 				};
+				this.protectors = protectors;
 				HashSet<string> stillDepleted = new HashSet<string>();
 				HashSet<string> regrown = new HashSet<string>();
 				int errors = 0;
@@ -308,7 +322,7 @@ namespace ResourceRegrowth
 				state.KeepOnly(stillDepleted);
 				// The world changed and the clocks were reset; a crash before the next autosave would
 				// lose the one and keep the other, so save now (the same call as the autosave).
-				if (regrown.Count > 0 && ZNet.instance.EnoughDiskSpaceAvailable(out bool _))
+				if ((regrown.Count > 0 || terrainStepped) && ZNet.instance.EnoughDiskSpaceAvailable(out bool _))
 				{
 					ZNet.instance.Save(sync: false, saveOtherPlayerProfiles: true, waitForNextFrame: true);
 				}
@@ -317,11 +331,14 @@ namespace ResourceRegrowth
 				RegrowthPlugin.Log.LogInfo(
 					$"Pass{(dryRun ? " (dry run)" : "")}: "
 					+ string.Join("; ", tallies.Select(t =>
-						$"{Describe(t.Key)}s {t.Value.depleted} depleted ({t.Value.waiting} waiting, {t.Value.blocked} near player builds, {t.Value.inUse} in use, "
-						+ $"{t.Value.regrown} {(dryRun ? "would regrow" : "regrown")})"))
+						t.Key == Kind.Terrain
+							? $"terrain zones {t.Value.depleted} modified ({t.Value.waiting} waiting, {t.Value.blocked} all protected, {t.Value.inUse} in use, {t.Value.regrown} {(dryRun ? "would step" : "stepped")})"
+							: $"{Describe(t.Key)}s {t.Value.depleted} depleted ({t.Value.waiting} waiting, {t.Value.blocked} near player builds, {t.Value.inUse} in use, "
+							+ $"{t.Value.regrown} {(dryRun ? "would regrow" : "regrown")})"))
 					+ $". Scanned {zdos.Count} objects: {work.ElapsedMilliseconds} ms of work spread over {frames} frames ({wall.ElapsedMilliseconds} ms wall)."
 					+ (errors > 0 ? $" {errors} object(s) skipped after errors." : "")
-					+ (regrown.Count > 0 ? " World save requested." : ""));
+					+ (regrown.Count > 0 || terrainStepped ? " World save requested." : ""));
+				terrainStepped = false;
 				SaveState();
 			}
 			finally
@@ -330,12 +347,19 @@ namespace ResourceRegrowth
 			}
 		}
 
+		private Dictionary<Vector2s, List<Terrain.Protector>> protectors = new Dictionary<Vector2s, List<Terrain.Protector>>();
+
 		private void Decide(Candidate candidate, DateTime now, bool dryRun, Dictionary<Vector2s, List<Vector3>> blockers,
 			Tally tally, HashSet<string> stillDepleted, HashSet<string> regrown)
 		{
 			ZDO zdo = candidate.zdo;
 			if (ZDOMan.instance.GetZDO(candidate.uid) != zdo || zdo.GetPrefab() != candidate.prefab || !IsDepleted(candidate.kind, zdo))
 			{
+				return;
+			}
+			if (candidate.kind == Kind.Terrain)
+			{
+				DecideTerrain(zdo, now, dryRun, blockers, tally, stillDepleted);
 				return;
 			}
 			tally.depleted++;
@@ -386,6 +410,125 @@ namespace ResourceRegrowth
 				kind, Name(zdo.GetPrefab()).Replace(' ', '_'), p.x, p.y, p.z);
 		}
 
+		/*
+			Terrain has its own clocks: AfterHours since the zone's ground was first seen modified, then
+			StepHours between steps ("step" entries in the state). A zone is never "regrown" as a whole;
+			it is stepped while anything is left, and forgotten once nothing is.
+		*/
+		private void DecideTerrain(ZDO zdo, DateTime now, bool dryRun, Dictionary<Vector2s, List<Vector3>> blockers, Tally tally, HashSet<string> stillDepleted)
+		{
+			tally.depleted++;
+			string key = Key(Kind.Terrain, zdo);
+			string stepKey = "step" + key;
+			stillDepleted.Add(key);
+			Vector3 position = zdo.GetPosition();
+			double modified = Hours(state.DepletedSince(key, now), now);
+			double idle = Hours(state.LastSeen(ZoneSystem.GetZone(position)), now);
+			if (modified < settings.TerrainAfterHours.Value || idle < settings.IdleHours.Value)
+			{
+				tally.waiting++;
+				return;
+			}
+			if (state.HasKey(stepKey))
+			{
+				stillDepleted.Add(stepKey);
+				if (Hours(state.DepletedSince(stepKey, now), now) < settings.TerrainStepHours.Value)
+				{
+					tally.waiting++;
+					return;
+				}
+			}
+			if (InUse(zdo))
+			{
+				tally.inUse++;
+				return;
+			}
+			List<Terrain.Protector> near = ProtectorsNear(position);
+			float pieces = settings.TerrainProtectPiecesRadius.Value;
+			if (pieces > 0f)
+			{
+				foreach (Vector3 blocker in BlockersNear(blockers, position, pieces + 64f))
+				{
+					near.Add(new Terrain.Protector { position = blocker, radius = pieces });
+				}
+			}
+			Terrain.Data data = Terrain.Decode(zdo.GetByteArray(ZDOVars.s_TCData));
+			Terrain.Stats stats = new Terrain.Stats();
+			Terrain.Data result = Terrain.Step(data, position, near, settings, stats);
+			if (result == null)
+			{
+				// Everything left is protected (or already zero).
+				tally.blocked++;
+				return;
+			}
+			tally.regrown++;
+			if (tally.logged < settings.LogDetailsPerPass.Value)
+			{
+				tally.logged++;
+				RegrowthPlugin.Log.LogInfo(
+					$"{(dryRun ? "Would step" : "Stepped")} terrain of zone {position.x:0},{position.z:0}: height changes {stats.modifiedBefore} -> {stats.modifiedAfter} vertices, "
+					+ $"paint {stats.paintedBefore} -> {stats.paintedAfter}, {stats.protectedVertices} protected; modified {modified:0.#} h ago, area idle {idle:0.##} h.");
+			}
+			if (!dryRun)
+			{
+				zdo.Set(ZDOVars.s_TCData, Terrain.Encode(result));
+				state.Forget(stepKey);
+				state.DepletedSince(stepKey, now);
+				stillDepleted.Add(stepKey);
+				terrainStepped = true;
+			}
+		}
+
+		private bool terrainStepped;
+
+		private List<Terrain.Protector> ProtectorsNear(Vector3 position)
+		{
+			List<Terrain.Protector> list = new List<Terrain.Protector>();
+			Vector2s zone = ZoneSystem.GetZone(position);
+			// A zone is 64 m; protectors up to two zones away can reach into it (wards 32 m, multiplied).
+			for (int dy = -2; dy <= 2; dy++)
+			{
+				for (int dx = -2; dx <= 2; dx++)
+				{
+					if (protectors.TryGetValue(new Vector2s(zone.x + dx, zone.y + dy), out List<Terrain.Protector> found))
+					{
+						list.AddRange(found);
+					}
+				}
+			}
+			return list;
+		}
+
+		private static IEnumerable<Vector3> BlockersNear(Dictionary<Vector2s, List<Vector3>> blockers, Vector3 position, float radius)
+		{
+			int zones = Mathf.CeilToInt(radius / 64f);
+			Vector2s zone = ZoneSystem.GetZone(position);
+			for (int dy = -zones; dy <= zones; dy++)
+			{
+				for (int dx = -zones; dx <= zones; dx++)
+				{
+					if (blockers.TryGetValue(new Vector2s(zone.x + dx, zone.y + dy), out List<Vector3> list))
+					{
+						foreach (Vector3 blocker in list)
+						{
+							yield return blocker;
+						}
+					}
+				}
+			}
+		}
+
+		private static void AddProtector(Dictionary<Vector2s, List<Terrain.Protector>> protectors, Vector3 position, float radius)
+		{
+			Vector2s zone = ZoneSystem.GetZone(position);
+			if (!protectors.TryGetValue(zone, out List<Terrain.Protector> list))
+			{
+				list = new List<Terrain.Protector>();
+				protectors[zone] = list;
+			}
+			list.Add(new Terrain.Protector { position = position, radius = radius });
+		}
+
 		private float AfterHours(Kind kind)
 		{
 			switch (kind)
@@ -402,6 +545,7 @@ namespace ResourceRegrowth
 			{
 				case Kind.Core: return "surtling core stand";
 				case Kind.Chest: return "treasure chest";
+				case Kind.Terrain: return "terrain zone";
 				default: return "creature spawner";
 			}
 		}
@@ -419,6 +563,8 @@ namespace ResourceRegrowth
 					return zdo.GetBool(ZDOVars.s_picked, corePrefabs[zdo.GetPrefab()]);
 				case Kind.Chest:
 					return IsLootedChest(zdo);
+				case Kind.Terrain:
+					return Terrain.IsModified(zdo.GetByteArray(ZDOVars.s_TCData));
 				default:
 					ZDOConnection connection = zdo.GetConnection();
 					return connection != null
